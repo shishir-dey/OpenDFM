@@ -1,0 +1,39 @@
+{
+  "name": "opendfm",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A private, browser-based Gerber design-for-manufacturing checker.",
+  "keywords": [
+    "gerber",
+    "pcb",
+    "dfm",
+    "webassembly",
+    "open-source"
+  ],
+  "homepage": "https://shishir-dey.github.io/OpenDFM/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shishir-dey/OpenDFM.git"
+  },
+  "bugs": {
+    "url": "https://github.com/shishir-dey/OpenDFM/issues"
+  },
+  "author": "Shishir Dey",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "wasm": "wasm-pack build wasm --target web --out-dir pkg --release",
+    "predev": "npm run wasm",
+    "dev": "vite",
+    "prebuild": "npm run wasm",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test:wasm": "cargo test --manifest-path wasm/Cargo.toml && npm run wasm && node scripts/smoke-wasm.mjs"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "vite": "latest"
+  }
+}
