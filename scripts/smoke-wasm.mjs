@@ -7,7 +7,7 @@ const result = inputPath
 
 if (!result.fileName) throw new Error('Expected a Gerber file name.');
 if (!inputPath && result.byteLength !== 0) throw new Error('Expected an empty Gerber input.');
-if (result.layers.length !== 0) throw new Error('Expected no parsed layers.');
+if (result.layers.length !== 1) throw new Error('Expected one detected Gerber layer.');
 if (result.violations.length !== 0) throw new Error('Expected no DFM violations.');
 if (result.svg !== undefined) throw new Error('Expected no SVG output.');
 
@@ -16,5 +16,6 @@ console.log(JSON.stringify({
   fileName: result.fileName,
   byteLength: result.byteLength,
   layers: result.layers.length,
+  primitives: result.layers[0].primitiveCount,
   violations: result.violations.length,
 }, null, 2));

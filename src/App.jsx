@@ -2,16 +2,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   CloseIcon,
   FileIcon,
+  FitViewIcon,
   GithubIcon,
   LayersIcon,
   UploadIcon,
+  ZoomInIcon,
+  ZoomOutIcon,
 } from './icons.jsx';
+import { analyzeGerberFiles } from './lib/gerberWasm.js';
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const LOGO_URL = `${import.meta.env.BASE_URL}OpenDFM.png`;
 const SUPPORTED_EXTENSIONS = [
-  '.zip', '.rar', '.gbr', '.ger', '.gtl', '.gbl', '.gts', '.gbs', '.gto', '.gbo',
-  '.gko', '.gm1', '.drl', '.xln', '.txt', '.art', '.pho',
+  '.gbr', '.ger', '.gtl', '.gbl', '.g1', '.g2', '.g3', '.g4', '.gts', '.gbs',
+  '.gto', '.gbo', '.gtp', '.gbp', '.gko', '.gm1', '.gml', '.drl', '.xln',
+  '.exc', '.ncd', '.txt', '.art', '.pho',
 ];
 
 const DFM_ENGINES = [
@@ -106,6 +111,20 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 }
 
+function formatMillimeters(value) {
+  return `${value > 0 ? value.toFixed(2) : '0.00'} mm`;
+}
+
+function layerOpacity(kind) {
+  if (kind.includes('soldermask')) return 0.5;
+  if (kind.includes('paste')) return 0.72;
+  return 1;
+}
+
+function serializeViewBox(viewport) {
+  return `${viewport.x} ${viewport.y} ${viewport.width} ${viewport.height}`;
+}
+
 function RuleGroup({ title, rules }) {
   return (
     <section className="analysis-group">
@@ -135,12 +154,19 @@ function RuleGroup({ title, rules }) {
 function App() {
   const inputRef = useRef(null);
   const engineRef = useRef(null);
+  const svgRef = useRef(null);
+  const viewportRef = useRef(null);
   const [files, setFiles] = useState([]);
   const [error, setError] = useState('');
   const [dragging, setDragging] = useState(false);
   const [activeTab, setActiveTab] = useState('dfm');
   const [dfmEngine, setDfmEngine] = useState('generic');
   const [engineOpen, setEngineOpen] = useState(false);
+  const [gerberAnalysis, setGerberAnalysis] = useState(null);
+  const [visibleLayers, setVisibleLayers] = useState({});
+  const [viewport, setViewport] = useState(null);
+  const [legendVisible, setLegendVisible] = useState(true);
+  const [processing, setProcessing] = useState(false);
 
   useEffect(() => {
     const closeEngineMenu = (event) => {
@@ -157,6 +183,40 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!files.length) {
+      setGerberAnalysis(null);
+      setVisibleLayers({});
+      setViewport(null);
+      setProcessing(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    setProcessing(true);
+    setError('');
+    analyzeGerberFiles(files)
+      .then((analysis) => {
+        if (cancelled) return;
+        setGerberAnalysis(analysis);
+        setViewport(analysis.fitViewBox);
+        setVisibleLayers(Object.fromEntries(analysis.layers.map((layer) => [layer.id, true])));
+      })
+      .catch((reason) => {
+        if (cancelled) return;
+        console.error(reason);
+        setGerberAnalysis(null);
+        setError(reason instanceof Error ? reason.message : 'Unable to parse the selected Gerber files.');
+      })
+      .finally(() => {
+        if (!cancelled) setProcessing(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [files]);
+
   const selectedEngine = DFM_ENGINES.find(([value]) => value === dfmEngine)?.[1] ?? 'Generic';
 
   const addFiles = useCallback((fileList) => {
@@ -171,7 +231,7 @@ function App() {
 
     const unsupported = incoming.find((file) => !isSupported(file));
     if (unsupported) {
-      setError(`${unsupported.name} is not a supported Gerber, drill, or ZIP file.`);
+      setError(`${unsupported.name} is not a supported Gerber or drill file.`);
       return;
     }
 
@@ -191,6 +251,77 @@ function App() {
     () => files.reduce((total, file) => total + file.size, 0),
     [files],
   );
+
+  const stackupMetrics = useMemo(() => {
+    const board = gerberAnalysis?.board;
+    const values = {
+      'PCB layers': String(board?.layerCount ?? 0),
+      'PCB size': board?.widthMm > 0
+        ? `${board.widthMm.toFixed(2)} × ${board.heightMm.toFixed(2)} mm`
+        : '0 × 0 mm',
+      'Minimum track width': formatMillimeters(board?.minimumTrackWidthMm ?? 0),
+      'Minimum hole diameter': formatMillimeters(board?.minimumHoleDiameterMm ?? 0),
+      'Hole count': String(board?.holeCount ?? 0),
+      'Hole density': board?.widthMm > 0 && board?.heightMm > 0
+        ? `${(board.holeCount / (board.widthMm * board.heightMm / 100)).toFixed(2)} / cm²`
+        : '0 / cm²',
+      'Pad count': String(board?.padCount ?? 0),
+    };
+    return STACKUP_METRICS.map(([label, value]) => [label, values[label] ?? value]);
+  }, [gerberAnalysis]);
+
+  const zoomView = useCallback((factor, anchor) => {
+    setViewport((current) => {
+      const fit = gerberAnalysis?.fitViewBox;
+      if (!current || !fit) return current;
+
+      const minimumWidth = fit.width * 0.02;
+      const maximumWidth = fit.width * 8;
+      const nextWidth = Math.min(maximumWidth, Math.max(minimumWidth, current.width * factor));
+      const scale = nextWidth / current.width;
+      const focus = anchor ?? {
+        x: current.x + current.width / 2,
+        y: current.y + current.height / 2,
+      };
+
+      return {
+        x: focus.x - (focus.x - current.x) * scale,
+        y: focus.y - (focus.y - current.y) * scale,
+        width: nextWidth,
+        height: current.height * scale,
+      };
+    });
+  }, [gerberAnalysis]);
+
+  const onViewportWheel = useCallback((event) => {
+    if (!viewport || !svgRef.current) return;
+    if (event.target instanceof Element && event.target.closest('.layer-legend, .viewer-controls, .legend-show-button')) return;
+    event.preventDefault();
+
+    const svg = svgRef.current;
+    const screenMatrix = svg.getScreenCTM();
+    let anchor;
+    if (screenMatrix) {
+      const point = svg.createSVGPoint();
+      point.x = event.clientX;
+      point.y = event.clientY;
+      const transformed = point.matrixTransform(screenMatrix.inverse());
+      anchor = { x: transformed.x, y: transformed.y };
+    }
+    const delta = Math.max(-100, Math.min(100, event.deltaY));
+    zoomView(Math.exp(delta * 0.0025), anchor);
+  }, [viewport, zoomView]);
+
+  useEffect(() => {
+    const element = viewportRef.current;
+    if (!element) return undefined;
+    element.addEventListener('wheel', onViewportWheel, { passive: false });
+    return () => element.removeEventListener('wheel', onViewportWheel);
+  }, [gerberAnalysis, onViewportWheel]);
+
+  const zoomPercent = viewport && gerberAnalysis?.fitViewBox
+    ? Math.round((gerberAnalysis.fitViewBox.width / viewport.width) * 100)
+    : 100;
 
   const removeFile = (fileToRemove) => {
     setFiles((current) => current.filter((file) => file !== fileToRemove));
@@ -288,7 +419,7 @@ function App() {
                   <div className="empty-state">
                     <div className="drop-icon"><LayersIcon size={26} /></div>
                     <h1>Check your Gerber files</h1>
-                    <p>Drop a fabrication ZIP or select the individual Gerber and drill files.</p>
+                    <p>Drop the individual Gerber and Excellon drill files for your board.</p>
                     <button type="button" onClick={() => inputRef.current?.click()}>
                       <UploadIcon size={18} /> Choose files
                     </button>
@@ -301,7 +432,95 @@ function App() {
                         <strong>{files.length} {files.length === 1 ? 'file' : 'files'} · {formatBytes(totalSize)}</strong>
                       </div>
                     </div>
-                    <div id="gerber-svg-viewport" className="svg-viewport" />
+                    <div
+                      ref={viewportRef}
+                      id="gerber-svg-viewport"
+                      className="svg-viewport"
+                    >
+                      {gerberAnalysis && viewport && (
+                        <svg
+                          ref={svgRef}
+                          className="gerber-svg"
+                          viewBox={serializeViewBox(viewport)}
+                          preserveAspectRatio="xMidYMid meet"
+                          role="img"
+                          aria-label="Gerber layer preview"
+                        >
+                          {gerberAnalysis.layers.map((layer) => (
+                            visibleLayers[layer.id] !== false && (
+                              <g
+                                key={layer.id}
+                                opacity={layerOpacity(layer.kind)}
+                                dangerouslySetInnerHTML={{ __html: layer.svg }}
+                              />
+                            )
+                          ))}
+                        </svg>
+                      )}
+                      {gerberAnalysis?.layers.length > 0 && legendVisible && (
+                        <div className="layer-legend">
+                          <div className="legend-heading">
+                            <strong>Layers</strong>
+                            <button type="button" onClick={() => setLegendVisible(false)}>
+                              Hide
+                            </button>
+                          </div>
+                          <div className="legend-list">
+                            {gerberAnalysis.layers.map((layer) => {
+                              const visible = visibleLayers[layer.id] !== false;
+                              return (
+                                <button
+                                  className={visible ? 'visible' : ''}
+                                  type="button"
+                                  aria-pressed={visible}
+                                  key={layer.id}
+                                  onClick={() => setVisibleLayers((current) => ({
+                                    ...current,
+                                    [layer.id]: !visible,
+                                  }))}
+                                >
+                                  <i style={{ backgroundColor: layer.color }} />
+                                  <span>
+                                    <strong title={layer.name}>{layer.name}</strong>
+                                    <small>{layer.kindLabel}</small>
+                                  </span>
+                                  <b aria-hidden="true" />
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                      {gerberAnalysis?.layers.length > 0 && !legendVisible && (
+                        <button
+                          className="legend-show-button"
+                          type="button"
+                          onClick={() => setLegendVisible(true)}
+                        >
+                          <LayersIcon size={15} /> Layers
+                        </button>
+                      )}
+                      {gerberAnalysis?.layers.length > 0 && viewport && (
+                        <div className="viewer-controls" role="group" aria-label="Gerber zoom controls">
+                          <button type="button" onClick={() => zoomView(0.8)} aria-label="Zoom in" title="Zoom in">
+                            <ZoomInIcon />
+                          </button>
+                          <button type="button" onClick={() => zoomView(1.25)} aria-label="Zoom out" title="Zoom out">
+                            <ZoomOutIcon />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setViewport(gerberAnalysis.fitViewBox)}
+                            aria-label="Fit board to view"
+                            title="Fit board to view"
+                          >
+                            <FitViewIcon />
+                          </button>
+                          <output aria-live="polite">{zoomPercent}%</output>
+                        </div>
+                      )}
+                      {processing && <div className="processing-overlay">Parsing Gerber layers…</div>}
+                    </div>
                     <div className="selected-files-strip" aria-label="Selected fabrication files">
                       {files.map((file) => (
                         <div className="file-chip" key={`${file.name}:${file.size}:${file.lastModified}`}>
@@ -353,10 +572,10 @@ function App() {
                         <section className="stackup-section">
                           <div className="analysis-group-heading">
                             <h3>PCB details</h3>
-                            <span>{STACKUP_METRICS.length} values</span>
+                            <span>{stackupMetrics.length} values</span>
                           </div>
                           <div className="stackup-metrics">
-                            {STACKUP_METRICS.map(([label, value]) => (
+                            {stackupMetrics.map(([label, value]) => (
                               <div className="metric-row" key={label}>
                                 <span>{label}</span>
                                 <strong>{value}</strong>
